@@ -3,3 +3,4 @@ opencv-python
 cmake
 dlib
 pickle-mixin
+numpy
