@@ -7,108 +7,155 @@ from datetime import datetime
 import mediapipe as mp
 import time
 
-# ========== CONFIG ==========
+# === CONFIGURATION ===
 ALERT_THRESHOLD = 0.45
-DETECTION_INTERVAL = 10  # Run detection every N frames
-RESIZE_SCALE = 0.5       # Resize input frame for performance
+DETECTION_INTERVAL = 30
+RESIZE_SCALE = 0.5
 
-# ========== LOAD ENCODINGS ==========
+# === Load face encodings ===
 with open('models/encodings.pkl', 'rb') as f:
     data = pickle.load(f)
     known_encodings = data["encodings"]
     known_names = data["names"]
 
-# ========== INITIALIZE MEDIAPIPE ==========
+# === MediaPipe Face Detector ===
 mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
 
-# ========== INIT ==========
+# === Create output directory ===
 os.makedirs("results", exist_ok=True)
+
+# === Face Detection using MediaPipe ===
+def detect_faces_mediapipe(frame):
+    small_frame = cv2.resize(frame, (0, 0), fx=RESIZE_SCALE, fy=RESIZE_SCALE)
+    results = face_detection.process(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB))
+    boxes = []
+
+    if results.detections:
+        for detection in results.detections:
+            bbox = detection.location_data.relative_bounding_box
+            h, w, _ = small_frame.shape
+            x1 = int(bbox.xmin * w)
+            y1 = int(bbox.ymin * h)
+            width = int(bbox.width * w)
+            height = int(bbox.height * h)
+
+            top = int(y1 / RESIZE_SCALE)
+            right = int((x1 + width) / RESIZE_SCALE)
+            bottom = int((y1 + height) / RESIZE_SCALE)
+            left = int(x1 / RESIZE_SCALE)
+
+            boxes.append((top, right, bottom, left))
+    return boxes
+
+# === Initialize Webcam ===
 cap = cv2.VideoCapture(0)
-print("[INFO] Starting webcam...")
-
-# Variables for tracking
-trackers = []
 frame_count = 0
+trackers = []
+names = []
 
-# FPS tracking
-prev_time = time.time()
+# Recognition Accuracy Counters
+correct_matches = 0
+wrong_matches = 0
+missed_matches = 0
+
+# FPS init
 fps = 0
+prev_time = time.time()
+
+print("[INFO] Starting webcam...")
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    orig_frame = frame.copy()
-    small_frame = cv2.resize(frame, (0, 0), fx=RESIZE_SCALE, fy=RESIZE_SCALE)
-    frame_count += 1
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # ========== RUN DETECTION ==========
     if frame_count % DETECTION_INTERVAL == 0:
-        trackers = []  # Reset trackers
-        rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-        results = face_detection.process(rgb_small)
+        face_locations = detect_faces_mediapipe(frame)
+        face_encs = face_recognition.face_encodings(rgb_frame, face_locations)
 
-        if results.detections:
-            for detection in results.detections:
-                bboxC = detection.location_data.relative_bounding_box
-                h, w, _ = small_frame.shape
-                x1 = int(bboxC.xmin * w)
-                y1 = int(bboxC.ymin * h)
-                width = int(bboxC.width * w)
-                height = int(bboxC.height * h)
+        trackers = []
+        names = []
 
-                # Convert to original scale
-                scale = 1 / RESIZE_SCALE
-                x1_full = int(x1 * scale)
-                y1_full = int(y1 * scale)
-                width_full = int(width * scale)
-                height_full = int(height * scale)
+        for (top, right, bottom, left), face_enc in zip(face_locations, face_encs):
+            dists = face_recognition.face_distance(known_encodings, face_enc)
+            idx = np.argmin(dists)
+            name = "Unknown"
+            if dists[idx] < ALERT_THRESHOLD:
+                name = known_names[idx]
+                print(f"[ALERT] MATCH FOUND: {name}")
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                cv2.imwrite(f"results/match_{name}_{ts}.jpg", frame)
 
-                tracker = cv2.TrackerCSRT_create()
-                tracker.init(orig_frame, (x1_full, y1_full, width_full, height_full))
-                trackers.append(tracker)
+                # Accuracy Tracking
+                if known_names[idx] == name:
+                    correct_matches += 1
+                else:
+                    wrong_matches += 1
+            else:
+                missed_matches += 1  # face not recognized
 
-    # ========== UPDATE TRACKERS ==========
-    boxes = []
-    for tracker in trackers:
-        success, box = tracker.update(orig_frame)
-        if success:
-            x, y, w, h = [int(v) for v in box]
-            boxes.append((y, x + w, y + h, x))  # (top, right, bottom, left)
+            tracker = cv2.TrackerKCF_create()
+            tracker.init(frame, (left, top, right - left, bottom - top))
+            trackers.append(tracker)
+            names.append(name)
 
-    # ========== FACE RECOGNITION ==========
-    rgb_frame = cv2.cvtColor(orig_frame, cv2.COLOR_BGR2RGB)
-    face_encs = face_recognition.face_encodings(rgb_frame, boxes)
+        # === Show Stats ===
+        total_attempts = correct_matches + wrong_matches + missed_matches
+        precision = correct_matches / (correct_matches + wrong_matches) if (correct_matches + wrong_matches) > 0 else 0
+        recall = correct_matches / (correct_matches + missed_matches) if (correct_matches + missed_matches) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
-    for (top, right, bottom, left), face_enc in zip(boxes, face_encs):
-        dists = face_recognition.face_distance(known_encodings, face_enc)
-        idx = np.argmin(dists)
-        name = "Unknown"
+    else:
+        new_trackers = []
+        new_names = []
+        for tracker, name in zip(trackers, names):
+            success, box = tracker.update(frame)
+            if success:
+                left, top, w, h = [int(v) for v in box]
+                right = left + w
+                bottom = top + h
 
-        if dists[idx] < ALERT_THRESHOLD:
-            name = known_names[idx]
-            print(f"[ALERT] MATCH FOUND: {name}")
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            cv2.imwrite(f"results/match_{name}_{ts}.jpg", orig_frame)
+                cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                cv2.putText(frame, name, (left, top - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                new_trackers.append(tracker)
+                new_names.append(name)
+        trackers = new_trackers
+        names = new_names
 
-        # Draw box & label
-        cv2.rectangle(orig_frame, (left, top), (right, bottom), (0, 255, 0), 2)
-        cv2.putText(orig_frame, name, (left, top - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    # ========== FPS COUNTER ==========
+    # === FPS Calculation ===
     curr_time = time.time()
     fps = 1 / (curr_time - prev_time)
     prev_time = curr_time
-    cv2.putText(orig_frame, f"FPS: {fps:.2f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
 
-    # ========== SHOW FRAME ==========
-    cv2.imshow("Criminal Recognition (MediaPipe + CSRT)", orig_frame)
+    # Display FPS
+    cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+    frame_count += 1
+    cv2.imshow("Criminal Recognition (MediaPipe + Tracking)", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+# === Final Stats ===
+print("\n=== FINAL STATS ===")
+print(f"Correct Matches: {correct_matches}")
+print(f"Wrong Matches:   {wrong_matches}")
+print(f"Missed Matches:  {missed_matches}")
+total_attempts = correct_matches + wrong_matches + missed_matches
+if total_attempts > 0:
+    precision = correct_matches / (correct_matches + wrong_matches) if (correct_matches + wrong_matches) > 0 else 0
+    recall = correct_matches / (correct_matches + missed_matches) if (correct_matches + missed_matches) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    print(f"Precision:       {precision:.2f}")
+    print(f"Recall:          {recall:.2f}")
+    print(f"F1 Score:        {f1:.2f}")
+else:
+    print("No recognition attempts recorded.")
 
 cap.release()
 cv2.destroyAllWindows()
