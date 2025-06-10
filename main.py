@@ -5,6 +5,7 @@ import pickle
 import os
 import time
 from datetime import datetime
+import mediapipe as mp
 
 # Load face encodings
 with open('models/encodings.pkl', 'rb') as f:
@@ -12,27 +13,28 @@ with open('models/encodings.pkl', 'rb') as f:
     known_encodings = data["encodings"]
     known_names = data["names"]
 
-# Load OpenCV DNN face detector
-modelFile = "models/face_detector/res10_300x300_ssd_iter_140000.caffemodel"
-configFile = "models/face_detector/deploy.prototxt.txt"
-net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
+mp_face_detection = mp.solutions.face_detection
+face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
 
 os.makedirs("results", exist_ok=True)
 ALERT_THRESHOLD = 0.45
 
-def detect_faces_dnn(image):
-    h, w = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300),
-                                 (104.0, 177.0, 123.0), False, False)
-    net.setInput(blob)
-    detections = net.forward()
+def detect_faces_mediapipe(frame):
+    results = face_detection.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     boxes = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            (x1, y1, x2, y2) = box.astype("int")
-            boxes.append((y1, x2, y2, x1))  # top, right, bottom, left
+    if results.detections:
+        h, w, _ = frame.shape
+        for detection in results.detections:
+            bbox = detection.location_data.relative_bounding_box
+            x1 = int(bbox.xmin * w)
+            y1 = int(bbox.ymin * h)
+            width = int(bbox.width * w)
+            height = int(bbox.height * h)
+            top = max(y1, 0)
+            right = min(x1 + width, w)
+            bottom = min(y1 + height, h)
+            left = max(x1, 0)
+            boxes.append((top, right, bottom, left))
     return boxes
 
 # Start webcam
@@ -48,7 +50,7 @@ while True:
         break
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    face_locations = detect_faces_dnn(rgb_frame)
+    face_locations = detect_faces_mediapipe(frame)
     face_encs = face_recognition.face_encodings(rgb_frame, face_locations)
 
     for (top, right, bottom, left), face_enc in zip(face_locations, face_encs):
@@ -61,22 +63,22 @@ while True:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             cv2.imwrite(f"results/match_{name}_{ts}.jpg", frame)
 
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
         cv2.putText(frame, name, (left, top - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     # === FPS Measurement ===
     frame_count += 1
     curr_time = time.time()
     elapsed = curr_time - prev_time
-    if elapsed >= 1.0:
+    if True:
         fps = frame_count / elapsed
         prev_time = curr_time
         frame_count = 0
         cv2.putText(frame, f"FPS: {fps:.2f}", (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
 
-    cv2.imshow("Criminal Recognition (OpenCV DNN)", frame)
+    cv2.imshow("Criminal Recognition (MediaPipe)", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
