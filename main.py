@@ -9,7 +9,7 @@ import time
 
 # === CONFIGURATION ===
 ALERT_THRESHOLD = 0.45
-DETECTION_INTERVAL = 5
+DETECTION_INTERVAL = 10
 RESIZE_SCALE = 0.5
 
 # === Load face encodings ===
@@ -20,7 +20,7 @@ with open('models/encodings.pkl', 'rb') as f:
 
 # === MediaPipe Face Detector ===
 mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
 
 # === Create output directory ===
 os.makedirs("results", exist_ok=True)
