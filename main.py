@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 import mediapipe as mp
 import time
+import csv
 
 # === CONFIGURATION ===
 ALERT_THRESHOLD = 0.45
@@ -24,6 +25,14 @@ face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detectio
 
 # === Create output directory ===
 os.makedirs("results", exist_ok=True)
+
+# === Setup CSV Logging ===
+log_file_path = os.path.join("results", "results_log.csv")
+csv_exists = os.path.isfile(log_file_path)
+log_file = open(log_file_path, mode='a', newline='')
+csv_writer = csv.writer(log_file)
+if not csv_exists:
+    csv_writer.writerow(["timestamp", "name", "distance", "image", "result"])
 
 # === Face Detection using MediaPipe ===
 def detect_faces_mediapipe(frame):
@@ -83,19 +92,26 @@ while True:
             dists = face_recognition.face_distance(known_encodings, face_enc)
             idx = np.argmin(dists)
             name = "Unknown"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
             if dists[idx] < ALERT_THRESHOLD:
                 name = known_names[idx]
                 print(f"[ALERT] MATCH FOUND: {name}")
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                cv2.imwrite(f"results/match_{name}_{ts}.jpg", frame)
+                image_filename = f"match_{name}_{ts}.jpg"
+                cv2.imwrite(os.path.join("results", image_filename), frame)
 
                 # Accuracy Tracking
                 if known_names[idx] == name:
                     correct_matches += 1
                 else:
                     wrong_matches += 1
+
+                # Log match
+                csv_writer.writerow([ts, name, round(dists[idx], 4), image_filename, "Match"])
             else:
-                missed_matches += 1  # face not recognized
+                missed_matches += 1
+                # Log unknown
+                csv_writer.writerow([ts, "Unknown", "N/A", "N/A", "Unknown"])
 
             tracker = cv2.TrackerKCF_create()
             tracker.init(frame, (left, top, right - left, bottom - top))
@@ -157,5 +173,7 @@ if total_attempts > 0:
 else:
     print("No recognition attempts recorded.")
 
+# Clean up
+log_file.close()
 cap.release()
 cv2.destroyAllWindows()
